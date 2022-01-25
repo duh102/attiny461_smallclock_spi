@@ -1,0 +1,6 @@
+*.elf
+*.hex
+nohup.out
+flash.sh
+program_*.sh
+readfuse.sh
