@@ -7,8 +7,6 @@
 #include "colormap.h"
 #include <stdbool.h>
 #include <avr/pgmspace.h>
-#include "tinyspi.h"
-//#include "mcp79510.h"
 
 #define MFP (1<<PB6)
 #define HH  (1<<PA0)
@@ -33,28 +31,35 @@ uint8_t curLed;
 // we need 78 LEDs in 8-bit chunks
 uint8_t led_enabled[10];
 
-uint8_t buttonDown = 0;
-uint8_t hour = 0;
-uint8_t hour12 = 0;
-uint8_t minute = 0;
-uint8_t second = 0;
-bool checkButton = false;
-bool updateDigits = false;
-bool updateColors = false;
+volatile uint8_t buttonDown = 0;
+volatile uint8_t hour = 0;
+volatile uint8_t hour12 = 12;
+volatile uint8_t minute = 0;
+volatile uint8_t second = 0;
+volatile bool checkButton = false;
+volatile bool updateDigits = false;
+volatile bool updateColors = false;
+volatile bool highClock = false;
 
 uint8_t buttonState;
 uint8_t temp, temp2, temp3;
 
 void updateDigit(uint8_t startLED, uint8_t value);
 
-/*ISR(PCINT_vect) {
+ISR(PCINT_vect) {
   checkButton=true;
-}*/
+}
 
-/*ISR(INT0_vect) {
+ISR(TIMER1_OVF_vect) {
+  if(highClock) {
+    OCR1C = 0xE5;
+  } else {
+    OCR1C = 0xE6;
+  }
+  highClock=!highClock;
   second++;
   updateDigits = true;
-}*/
+}
 
 void updateDigit(uint8_t startLED, uint8_t value) {
   for(curLed = startLED; curLed < (startLED+13); curLed++) {
@@ -78,47 +83,34 @@ int main() {
     led_enabled[curLed] = 0;
   }
 
-  // Enable SPI
-  setup_spi();
+  // Set the two button pins as input
+  DDRA &= ~(HH | MM);
 
-  // Enable interrupts on INT0 and the pin change interrupt
+  // Enable the pin change interrupt
   // PCIE1 enables pin change interrupts on PA0-PA7 and PB4-PB7 (HH is on PA0 and MM is on PA1)
-  // INT0 enables the external interrupt on PB6 (where the MFP is)
-  //GIMSK = (1<<INT0) | (1<<PCIE1);
-  //GIMSK = (1<<INT0);
-  // Set INT0 to trigger on rising edge
-  //MCUCR |= (1<<ISC00) | (1<<ISC01);
+  GIMSK = (1<<PCIE1);
+  
   // Enable pin change interrupt on HH and MM
-  //PCMSK0 = (1<<PCINT0) | (1<<PCINT1);
+  PCMSK0 = (1<<PCINT0) | (1<<PCINT1);
 
-  uint8_t buf[] = {0b00110011,0x02,3,4,5,6};
-  spi_transaction(buf, buf, 2, 6);
+  // Set timer1's prescaler to the second highest value, clk/8192
+  // At 8MHz nominal, the output frequency will then be 976.5625Hz
+  TCCR1B = (1<<CS13) | (1<<CS12) | (1<<CS11);
+  // Set up the TOP value of the counter (when it fires the OVF interrupt) to 976
+  // We'll toggle between it and 977 to get very close to 976.5 (nominally 0.0625Hz away)
+  // We have to manually set up the two registers, TC1H and OCR1C,
+  //  because GCC isn't smart enough to do the set manually (TC1H is shared between all the OCR1x registers)
+  // 976 = 0x3D0
+  // 977 = (obviously) 0x3D1
+  TC1H = 0x03;
+  OCR1C = 0xE4;
+  // Enable the output compare interrupt for timer1
+  TIMSK = (1<<TOIE1);
+  updateDigits = true;
 
-  /*
-  // Make sure the RTC is enabled and the battery is enabled
-  initRTC(true);
-  // Enable MFP output at 1Hz
-  setMFPOutput(true, MFP_1HZ);
-  // Retrieve the data
-  readTime(&hour, &minute, &second);
-  /*updateDigits = oscRunning();
-  if(!updateDigits) {
-  }*/
-  //updateDigits = true;
-
-  // Enable the interrupts
-  //sei();
+  sei();
 
   while(1) {
-    updateDigit(HT_START, (buf[0+state]&0b11110000)>>4);
-    updateDigit(HO_START, buf[0+state]&0b1111);
-    updateDigit(MT_START, (buf[1+state]&0b11110000)>>4);
-    updateDigit(MO_START, buf[1+state]&0b1111);
-    updateDigit(ST_START, (buf[2+state]&0b11110000)>>4);
-    updateDigit(SO_START, buf[2+state]&0b1111);
-    updateColors = true;
-    state = (state + 3) % 6;
-    /*
     if(!(checkButton || updateDigits || updateColors)) {
       innerstate = (innerstate+1) % STATE_STEPS;
       if(innerstate == 0) {
@@ -135,7 +127,6 @@ int main() {
         checkButton=false;
         updateDigits = true;
         buttonDown = 0;
-        readTime(&hour, &minute, &second);
       } else {
         if(buttonDown == 0) {
           buttonDown = BUTTONDOWN_RESET;
@@ -145,8 +136,8 @@ int main() {
           }
           if(buttonState&HH) {
             hour = (hour + 1) % 24;
+            hour12 = (hour == 0 || hour == 12)? 12 : hour % 12;
           }
-          writeTime(hour, minute, second);
           updateDigits = true;
         }
         buttonDown--;
@@ -165,10 +156,6 @@ int main() {
           hour = (hour + 1) % 24;
           hour12 = (hour == 0 || hour == 12)? 12 : hour % 12;
         }
-        // re-read the time every 30 minutes, just to make sure we're not losing too many seconds during the LED burst
-        if(minute == 0 || minute == 30) {
-          readTime(&hour, &minute, &second);
-        }
       }
 
       updateDigit(HT_START, hour12/10);
@@ -179,7 +166,6 @@ int main() {
       updateDigit(SO_START, second%10);
       updateColors = true;
     }
-    */
     if(updateColors) {
       updateColors = false;
       cli();
@@ -194,8 +180,7 @@ int main() {
           ws2812_set_single(0, 0, 0);
         }
       }
-      //sei();
+      sei();
     }
-    _delay_ms(1000);
   }
 }
